@@ -131,3 +131,65 @@ impl Worker {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{decode, folder};
+    use image::{Rgb, RgbImage};
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    struct TestFolder(PathBuf);
+
+    impl TestFolder {
+        fn new() -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "slideshow-viewer-test-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestFolder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn discovers_and_decodes_supported_photos_in_filename_order() {
+        let dir = TestFolder::new();
+        let pixels = RgbImage::from_pixel(8, 6, Rgb([240, 30, 10]));
+        for name in ["03.bmp", "01.jpeg", "02.png"] {
+            pixels.save(dir.0.join(name)).unwrap();
+        }
+        fs::write(dir.0.join("notes.txt"), "ignored").unwrap();
+        fs::create_dir(dir.0.join("subfolder.png")).unwrap();
+
+        let paths = folder(&dir.0).unwrap();
+        assert_eq!(
+            paths,
+            ["01.jpeg", "02.png", "03.bmp"].map(|name| dir.0.join(name))
+        );
+        for path in paths {
+            let photo = decode(&path, (4, 4)).unwrap();
+            assert_eq!((photo.width, photo.height), (4, 3));
+            assert_eq!(photo.pixels.len(), 4 * 3 * 4);
+            let bgr = &photo.pixels[..3];
+            assert!(bgr[0] < 25 && bgr[1] < 50 && bgr[2] > 220);
+        }
+    }
+
+    #[test]
+    fn reports_corrupt_photo() {
+        let dir = TestFolder::new();
+        let path = dir.0.join("broken.png");
+        fs::write(&path, b"not a PNG").unwrap();
+        assert!(decode(&path, (4, 4)).is_err());
+    }
+}

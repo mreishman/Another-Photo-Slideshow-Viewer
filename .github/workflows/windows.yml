@@ -1,0 +1,66 @@
+name: Windows CI and release
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Run tests
+        run: cargo +stable test --locked --all-targets
+      - name: Build release executable
+        run: cargo +stable build --locked --release
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-release-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Publish a new Cargo version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $metadata = cargo +stable metadata --no-deps --locked --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read Cargo metadata.' }
+          $package = $metadata.packages | Where-Object name -eq 'another-photo-slideshow-viewer'
+          if (-not $package) { throw 'Could not find the slideshow viewer package.' }
+          $tag = "v$($package.version)"
+          $published = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list existing releases.' }
+          if ($published -contains $tag) {
+            Write-Host "Release $tag already exists."
+            exit 0
+          }
+          $existingTag = gh api --paginate "repos/$env:GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check the remote tag.' }
+          if ($existingTag -contains $tag) { throw "Tag $tag already exists without a release. Resolve it before retrying." }
+
+          cargo +stable build --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+          $exe = "target/x86_64-pc-windows-msvc/release/$($package.name).exe"
+          $zip = "$($package.name)-$tag-windows-x64.zip"
+          Compress-Archive -LiteralPath $exe, 'README.md', 'LICENSE' -DestinationPath $zip
+          gh release create $tag $zip --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Another Photo Slideshow Viewer $tag" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish $tag." }
+

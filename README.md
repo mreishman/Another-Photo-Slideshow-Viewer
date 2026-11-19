@@ -40,3 +40,14 @@ The viewer scans the selected folder itself, starts paused, and defaults to five
 
 The only direct third-party Cargo dependency is `image` (MIT or Apache-2.0), with only JPEG, PNG, and BMP enabled. All decoding is delegated to that crate. The application uses the Windows system APIs for the window, folder picker, and drawing.
 
+
+## Versioning and releases
+
+Cargo.toml is the source of truth for the version. Cargo represents the initial
+0.1 release as 0.1.0, which the app displays in its title bar.
+
+GitHub Actions runs the Windows tests and release build on every branch push and
+pull request. After those checks pass on a push to main, the workflow publishes
+a Windows x64 ZIP under the tag for the version in Cargo.toml. Existing releases
+are skipped. For a new release, update the version in Cargo.toml and commit the
+updated Cargo.lock.
