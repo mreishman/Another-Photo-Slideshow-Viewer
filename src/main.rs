@@ -1,9 +1,11 @@
 #![windows_subsystem = "windows"]
 
 mod photos;
+mod shuffle;
 mod win;
 
 use photos::{Job, Output, Photo, Worker};
+use shuffle::Shuffle;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -41,6 +43,7 @@ struct App {
     deadline: Instant,
     status: String,
     loop_slides: bool,
+    shuffle: Option<Shuffle>,
     placement: Option<(Placement, i32)>,
     overlay_until: Option<Instant>,
     pointer: Point,
@@ -56,7 +59,7 @@ impl App {
             files: Vec::new(), index: 0, frame: None, thumbs: HashMap::new(),
             failed: HashSet::new(), worker: Worker::new(), generation: 0,
             playing: false, loading: false, interval: 5, deadline: Instant::now(),
-            status: String::new(), loop_slides: true, placement: None,
+            status: String::new(), loop_slides: true, shuffle: None, placement: None,
             overlay_until: None, pointer: Point { x: -1, y: -1 }, focus: None,
         }
     }
@@ -74,6 +77,7 @@ impl App {
                 self.frame = None;
                 self.thumbs.clear();
                 self.failed.clear();
+                if self.shuffle.is_some() { self.reset_shuffle(); }
                 self.playing = false;
                 self.status = if self.files.is_empty() { "This folder has no JPEG, PNG, or BMP photos.".into() } else { String::new() };
                 self.request();
@@ -95,8 +99,25 @@ impl App {
             .map(|i| (i, self.files[i].clone())).collect();
         let selected = self.files.get(self.index).cloned().map(|p| (self.index, p));
         self.loading = selected.is_some();
-        let prefetch = self.next_index(1).map(|i| self.files[i].clone());
+        let upcoming = match &self.shuffle {
+            Some(shuffle) => shuffle.peek(1, &self.failed),
+            None => self.next_index(1),
+        };
+        let prefetch = upcoming.map(|i| self.files[i].clone());
         self.worker.request(Job { generation: self.generation, selected, thumbs, prefetch });
+    }
+
+    fn reset_shuffle(&mut self) {
+        self.shuffle = Some(Shuffle::new(self.files.len(), self.index, &self.failed));
+    }
+
+    fn can_step(&self, direction: isize) -> bool {
+        match &self.shuffle {
+            Some(shuffle) => shuffle.peek(direction, &self.failed).is_some()
+                || (direction > 0 && self.loop_slides
+                    && Shuffle::can_loop(self.files.len(), self.index, &self.failed)),
+            None => self.next_index(direction).is_some(),
+        }
     }
 
     fn next_index(&self, direction: isize) -> Option<usize> {
@@ -121,7 +142,11 @@ impl App {
     }
 
     fn step(&mut self, direction: isize) {
-        if let Some(index) = self.next_index(direction) {
+        let next = match &mut self.shuffle {
+            Some(shuffle) => shuffle.step(direction, self.files.len(), self.loop_slides, &self.failed),
+            None => self.next_index(direction),
+        };
+        if let Some(index) = next {
             self.select(index);
         } else if direction > 0 {
             self.playing = false;
@@ -152,7 +177,7 @@ impl App {
                             self.failed.insert(index);
                             let filename = self.files[index].file_name().unwrap_or_default().to_string_lossy();
                             self.status = format!("Could not open {filename}: {error}");
-                            if self.playing && self.next_index(1).is_some() {
+                            if self.playing && self.can_step(1) {
                                 self.step(1);
                             } else {
                                 self.playing = false;
@@ -318,8 +343,8 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
             continue;
         }
         let disabled = match action {
-            Action::Previous => app.next_index(-1).is_none(),
-            Action::Next => app.next_index(1).is_none(),
+            Action::Previous => !app.can_step(-1),
+            Action::Next => !app.can_step(1),
             Action::Play => app.files.len() < 2,
             _ => false,
         };
@@ -437,13 +462,13 @@ unsafe fn fullscreen(window: Handle) {
 }
 
 unsafe fn settings(window: Handle, action: Action) {
-    let (interval, looping, mut point) = APP.with(|state| {
+    let (interval, looping, shuffled, mut point) = APP.with(|state| {
         let state = state.borrow();
         let app = state.as_ref().unwrap();
         let layout = Layout::new(client(window), dpi(window), app);
         let bounds = layout.controls.iter().find(|(item, _)| *item == action)
             .map(|(_, bounds)| *bounds).unwrap_or_default();
-        (app.interval, app.loop_slides, Point { x: bounds.left, y: bounds.bottom })
+        (app.interval, app.loop_slides, app.shuffle.is_some(), Point { x: bounds.left, y: bounds.bottom })
     });
     let menu = CreatePopupMenu();
     if menu.is_null() { return; }
@@ -454,6 +479,7 @@ unsafe fn settings(window: Handle, action: Action) {
     if action == Action::Settings {
         AppendMenuW(menu, 0x800, 0, null());
         AppendMenuW(menu, if looping { 8 } else { 0 }, 5, wide("Loop slideshow").as_ptr());
+        AppendMenuW(menu, if shuffled { 8 } else { 0 }, 6, wide("Shuffle slideshow").as_ptr());
     }
     ClientToScreen(window, &mut point);
     let command = TrackPopupMenu(menu, 0x180, point.x, point.y, 0, window, null());
@@ -467,6 +493,13 @@ unsafe fn settings(window: Handle, action: Action) {
                 app.reset_timer();
             }
             5 => app.loop_slides = !app.loop_slides,
+            6 => {
+                if app.shuffle.is_some() {
+                    app.shuffle = None;
+                } else {
+                    app.reset_shuffle();
+                }
+            }
             _ => {}
         }
     });
@@ -501,7 +534,10 @@ unsafe fn activate(window: Handle, action: Action) {
                 Action::Previous => app.step(-1),
                 Action::Next => app.step(1),
                 Action::Play => app.toggle(),
-                Action::Thumb(index) if index < app.files.len() => app.select(index),
+                Action::Thumb(index) if index < app.files.len() => {
+                    if let Some(shuffle) = &mut app.shuffle { shuffle.jump(index); }
+                    app.select(index);
+                }
                 _ => {}
             }
             app.reveal();
