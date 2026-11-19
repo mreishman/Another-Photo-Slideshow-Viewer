@@ -68,7 +68,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "frameview"
+name = "another-photo-slideshow-viewer"
 version = "0.1.0"
 dependencies = [
  "image",

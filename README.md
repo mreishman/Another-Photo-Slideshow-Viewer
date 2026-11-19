@@ -1,6 +1,6 @@
-# Frameview
+# Another Photo Slideshow Viewer
 
-Frameview is a native Windows photo slideshow viewer for JPEG, PNG, and BMP. The windowed view has a dark photo canvas, a five-photo strip, and a playback bar. Fullscreen uses the current monitor and reveals playback controls on pointer movement or keyboard navigation.
+Another Photo Slideshow Viewer is a native Windows photo slideshow viewer for JPEG, PNG, and BMP. The windowed view has a dark photo canvas, a five-photo strip, and a playback bar. Fullscreen uses the current monitor and reveals playback controls on pointer movement or keyboard navigation.
 
 ## Build and run
 
@@ -16,7 +16,7 @@ Pass a folder on the command line to open it immediately:
 cargo run --release -- "C:\Photos"
 ```
 
-Use `cargo build --release` to produce `target\release\frameview.exe`.
+Use `cargo build --release` to produce `target\release\another-photo-slideshow-viewer.exe`.
 
 ## Controls
 

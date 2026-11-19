@@ -611,7 +611,7 @@ fn main() {
         SetProcessDpiAwarenessContext(-4isize as Handle);
         let com = CoInitializeEx(null_mut(), 2);
         let instance = GetModuleHandleW(null());
-        let name = wide("FrameviewWindow");
+        let name = wide("AnotherPhotoSlideshowViewerWindow");
         let class = Class {
             style: 0, proc: window_proc, cls_extra: 0, wnd_extra: 0,
             instance, icon: null_mut(), cursor: LoadCursorW(null_mut(), 32512usize as *const u16),
@@ -620,12 +620,12 @@ fn main() {
         let window = if RegisterClassW(&class) == 0 {
             null_mut()
         } else {
-            CreateWindowExW(0, name.as_ptr(), wide("Frameview").as_ptr(), WINDOW_STYLE,
+            CreateWindowExW(0, name.as_ptr(), wide("Another Photo Slideshow Viewer").as_ptr(), WINDOW_STYLE,
                 i32::MIN, i32::MIN, 1100, 740, null_mut(), null_mut(), instance, null_mut())
         };
         if window.is_null() {
-            MessageBoxW(null_mut(), wide("Could not create the Frameview window.").as_ptr(),
-                wide("Frameview").as_ptr(), 0x10);
+            MessageBoxW(null_mut(), wide("Could not create the Another Photo Slideshow Viewer window.").as_ptr(),
+                wide("Another Photo Slideshow Viewer").as_ptr(), 0x10);
         } else {
             let mut app = App::new();
             if let Some(path) = std::env::args_os().nth(1) {
