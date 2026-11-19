@@ -46,8 +46,9 @@ The only direct third-party Cargo dependency is `image` (MIT or Apache-2.0), wit
 Cargo.toml is the source of truth for the version. Cargo represents the initial
 0.1 release as 0.1.0, which the app displays in its title bar.
 
-GitHub Actions runs the Windows tests and release build on every branch push and
-pull request. After those checks pass on a push to main, the workflow publishes
+GitHub Actions runs the Windows tests and release build on pushes to main and
+development, and when a pull request is opened. After checks pass on a push to
+main, the workflow publishes
 a Windows x64 ZIP under the tag for the version in Cargo.toml. Existing releases
 are skipped. For a new release, update the version in Cargo.toml and commit the
 updated Cargo.lock.
