@@ -1,0 +1,9 @@
+[package]
+name = "frameview"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[dependencies]
+image = { version = "=0.25.9", default-features = false, features = ["jpeg", "png", "bmp"] }
+
