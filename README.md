@@ -39,7 +39,12 @@ playback stops at the end of the pass.
 
 ## Folders and preferences
 
-Drop a folder on the app window or use **Open folder**. Settings lists the last
+Drop a folder on the app window or use **Open folder**. You can also drop one
+or more JPEG, PNG, or BMP files to start a paused slideshow of just those files,
+in the order Windows supplies them. If you drop photos and folders together,
+the viewer opens the selected photos. Photo drops do not change recent folders.
+
+Settings lists the last
 five folders and offers **Include subfolders**, which is off by default.
 The viewer restores the last folder at startup unless you pass a folder on the
 command line. Slide interval, looping, shuffle, and subfolder preferences are

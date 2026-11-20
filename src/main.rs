@@ -115,23 +115,50 @@ impl App {
         let (path, _) = self.scanning.take().unwrap();
         match result {
             Ok(files) => {
-                self.files = files;
-                self.folder_epoch += 1;
-                self.index = 0;
-                self.frame = None;
-                self.thumbs.clear();
-                self.failed.clear();
-                self.playing = false;
-                if self.shuffle.is_some() { self.reset_shuffle(); }
-                self.active_folder = Some(path.clone());
+                let empty = files.is_empty();
+                self.open_photos(files, Some(path.clone()));
                 self.preferences.remember(path);
-                self.status = if self.files.is_empty() { "This folder has no JPEG, PNG, or BMP photos.".into() } else { String::new() };
+                if empty { self.status = "This folder has no JPEG, PNG, or BMP photos.".into(); }
                 self.save_preferences();
-                self.request();
             }
             Err(error) => self.status = format!("Could not open folder: {error}"),
         }
         true
+    }
+
+    fn open_photos(&mut self, files: Vec<PathBuf>, folder: Option<PathBuf>) {
+        self.scanning = None;
+        self.active_folder = folder;
+        self.files = files;
+        self.folder_epoch += 1;
+        self.index = 0;
+        self.frame = None;
+        self.thumbs.clear();
+        self.failed.clear();
+        self.playing = false;
+        self.status.clear();
+        if self.shuffle.is_some() { self.reset_shuffle(); }
+        self.request();
+    }
+
+    fn open_drop(&mut self, paths: Vec<PathBuf>) {
+        let mut folder = None;
+        let mut photos = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            if photos::supported_path(&path) && path.is_file() {
+                if seen.insert(path.clone()) { photos.push(path); }
+            } else if folder.is_none() && path.is_dir() {
+                folder = Some(path);
+            }
+        }
+        if !photos.is_empty() {
+            self.open_photos(photos, None);
+        } else if let Some(folder) = folder {
+            self.set_folder(folder);
+        } else {
+            self.status = "Drop a folder or JPEG, PNG, or BMP photos.".into();
+        }
     }
 
     fn save_preferences(&mut self) {
@@ -587,18 +614,17 @@ unsafe fn settings(window: Handle, action: Action) {
     });
 }
 
-unsafe fn dropped_folder(drop: Handle) -> Option<PathBuf> {
+unsafe fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
     let count = DragQueryFileW(drop, u32::MAX, null_mut(), 0);
-    let path = (0..count).find_map(|index| {
+    let paths = (0..count).filter_map(|index| {
         let length = DragQueryFileW(drop, index, null_mut(), 0);
         let mut buffer = vec![0; length as usize + 1];
         let written = DragQueryFileW(drop, index, buffer.as_mut_ptr(), length + 1);
         if written == 0 { return None; }
-        let path = PathBuf::from(OsString::from_wide(&buffer[..written as usize]));
-        path.is_dir().then_some(path)
-    });
+        Some(PathBuf::from(OsString::from_wide(&buffer[..written as usize])))
+    }).collect();
     DragFinish(drop);
-    path
+    paths
 }
 
 unsafe fn activate(window: Handle, action: Action) {
@@ -726,14 +752,10 @@ unsafe extern "system" fn window_proc(window: Handle, msg: u32, wp: usize, lp: i
             InvalidateRect(window, null(), 0);
         }
         0x0233 => {
-            let folder = dropped_folder(wp as Handle);
+            let paths = dropped_paths(wp as Handle);
             APP.with(|state| {
                 if let Some(app) = state.borrow_mut().as_mut() {
-                    if let Some(path) = folder {
-                        app.set_folder(path);
-                    } else {
-                        app.status = "Drop a folder containing photos.".into();
-                    }
+                    app.open_drop(paths);
                 }
             });
             InvalidateRect(window, null(), 0);
@@ -797,3 +819,67 @@ fn main() {
 }
 
 
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use std::{fs, os::windows::ffi::OsStrExt, time::SystemTime};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+        fn GlobalLock(memory: Handle) -> Handle;
+        fn GlobalUnlock(memory: Handle) -> i32;
+    }
+
+    fn shell_paths(paths: &[&std::path::Path]) -> Vec<PathBuf> {
+        // DROPFILES header followed by a double-NUL-terminated UTF-16 list.
+        let header = [20u32, 0, 0, 0, 1];
+        let mut names = Vec::new();
+        for path in paths {
+            names.extend(path.as_os_str().encode_wide().chain(Some(0)));
+        }
+        names.push(0);
+        let bytes = size_of_val(&header) + size_of_val(names.as_slice());
+        unsafe {
+            let drop = GlobalAlloc(2, bytes);
+            assert!(!drop.is_null());
+            let memory = GlobalLock(drop).cast::<u8>();
+            assert!(!memory.is_null());
+            std::ptr::copy_nonoverlapping(header.as_ptr().cast(), memory, size_of_val(&header));
+            std::ptr::copy_nonoverlapping(
+                names.as_ptr().cast(),
+                memory.add(size_of_val(&header)),
+                size_of_val(names.as_slice()),
+            );
+            GlobalUnlock(drop);
+            dropped_paths(drop)
+        }
+    }
+
+    #[test]
+    fn opens_only_dropped_photos_in_shell_order() {
+        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("slideshow-drop-{stamp}"));
+        fs::create_dir(&root).unwrap();
+        let first = root.join("旅行.PNG");
+        let second = root.join("another.bmp");
+        let unrelated = root.join("not-selected.jpg");
+        let unsupported = root.join("notes.txt");
+        for path in [&first, &second, &unrelated, &unsupported] {
+            fs::write(path, []).unwrap();
+        }
+
+        let mut prefs = Preferences::default();
+        prefs.remember(root.clone());
+        let mut app = App::new(prefs);
+        app.open_drop(shell_paths(&[&first]));
+        assert_eq!(app.files, [first.clone()]);
+        app.open_drop(shell_paths(&[&second, &root, &unsupported, &first, &second]));
+        assert_eq!(app.files, [second, first]);
+        assert_eq!(app.preferences.recent, [root.clone()]);
+        assert!(app.active_folder.is_none() && !app.playing);
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

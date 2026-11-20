@@ -30,12 +30,7 @@ pub fn folder(path: &Path, subfolders: bool) -> io::Result<Vec<PathBuf>> {
                 pending.push(entry.path());
             } else if kind.is_file() {
                 let path = entry.path();
-                if matches!(
-                    path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(),
-                    Some("jpg" | "jpeg" | "png" | "bmp")
-                ) {
-                    files.push(path);
-                }
+                if supported_path(&path) { files.push(path); }
             }
         }
         let Some(children) = std::iter::from_fn(|| pending.pop()).find_map(|path| fs::read_dir(path).ok()) else { break; };
@@ -43,6 +38,13 @@ pub fn folder(path: &Path, subfolders: bool) -> io::Result<Vec<PathBuf>> {
     }
     files.sort_by_cached_key(|p| (p.to_string_lossy().to_lowercase(), p.clone()));
     Ok(files)
+}
+
+pub fn supported_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("jpg" | "jpeg" | "png" | "bmp")
+    )
 }
 
 fn decode(path: &Path, bounds: (u32, u32)) -> Result<Photo, String> {
