@@ -26,11 +26,16 @@ Use `cargo build --release` to produce `target\release\another-photo-slideshow-v
 | Left or Right | Previous or next photo |
 | Space | Play or pause |
 | Click a thumbnail | Jump to that photo |
-| Settings | Choose the slide interval or toggle looping |
+| Settings | Choose the slide interval or toggle looping and shuffle |
 | F11 / Esc | Enter or leave fullscreen |
 | Tab / Shift+Tab / Enter | Move control focus and activate it |
 
 The viewer scans the selected folder itself, starts paused, and defaults to five seconds per photo with looping enabled. It applies photo orientation metadata, blends PNG transparency over the dark canvas, and reports unreadable images. JPEG photos from an iPhone can be opened directly. HEIC is outside this release's format list.
+
+Enable **Shuffle slideshow** in Settings to play the current photo followed by
+the other readable photos in random order. **Previous** retraces playback history.
+With looping enabled, playback reshuffles after each pass. With looping off,
+playback stops at the end of the pass.
 
 ## Code
 
@@ -43,11 +48,11 @@ The only direct third-party Cargo dependency is `image` (MIT or Apache-2.0), wit
 
 ## Versioning and releases
 
-Cargo.toml is the source of truth for the version. Cargo represents the initial
-0.1 release as 0.1.0, which the app displays in its title bar.
+Cargo.toml defines the version displayed in the title bar.
 
-GitHub Actions runs the Windows tests and release build on every branch push and
-pull request. After those checks pass on a push to main, the workflow publishes
+GitHub Actions runs the Windows tests and release build on pushes to main and
+development, and when a pull request is opened. After checks pass on a push to
+main, the workflow publishes
 a Windows x64 ZIP under the tag for the version in Cargo.toml. Existing releases
 are skipped. For a new release, update the version in Cargo.toml and commit the
 updated Cargo.lock.
