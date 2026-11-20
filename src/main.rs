@@ -1,10 +1,12 @@
 #![windows_subsystem = "windows"]
 
 mod photos;
+mod preferences;
 mod shuffle;
 mod win;
 
 use photos::{Job, Output, Photo, Worker};
+use preferences::{Preferences, MAX_RECENT};
 use shuffle::Shuffle;
 use std::{
     cell::RefCell,
@@ -14,7 +16,7 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::PathBuf,
     ptr::{null, null_mut},
-    sync::Arc,
+    sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 use win::*;
@@ -29,7 +31,13 @@ const INTERVALS: [u64; 4] = [3, 5, 10, 30];
 
 thread_local! { static APP: RefCell<Option<App>> = const { RefCell::new(None) }; }
 
+type FolderScan = mpsc::Receiver<std::io::Result<Vec<PathBuf>>>;
+
 struct App {
+    preferences: Preferences,
+    active_folder: Option<PathBuf>,
+    scanning: Option<(PathBuf, FolderScan)>,
+    folder_epoch: u64,
     files: Vec<PathBuf>,
     index: usize,
     frame: Option<Arc<Photo>>,
@@ -54,12 +62,16 @@ struct App {
 enum Action { Open, Settings, Previous, Play, Next, Interval, Fullscreen, Thumb(usize) }
 
 impl App {
-    fn new() -> Self {
+    fn new(preferences: Preferences) -> Self {
+        let shuffle = preferences.shuffled.then(|| Shuffle::new(0, 0, &HashSet::new()));
+        let interval = preferences.interval;
+        let loop_slides = preferences.looping;
         Self {
+            preferences, active_folder: None, scanning: None, folder_epoch: 0,
             files: Vec::new(), index: 0, frame: None, thumbs: HashMap::new(),
             failed: HashSet::new(), worker: Worker::new(), generation: 0,
-            playing: false, loading: false, interval: 5, deadline: Instant::now(),
-            status: String::new(), loop_slides: true, shuffle: None, placement: None,
+            playing: false, loading: false, interval, deadline: Instant::now(),
+            status: String::new(), loop_slides, shuffle, placement: None,
             overlay_until: None, pointer: Point { x: -1, y: -1 }, focus: None,
         }
     }
@@ -70,19 +82,64 @@ impl App {
     fn reset_timer(&mut self) { self.deadline = Instant::now() + Duration::from_secs(self.interval); }
 
     fn set_folder(&mut self, path: PathBuf) {
-        match photos::folder(&path) {
+        self.scanning = None;
+        let path = match std::path::absolute(path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = format!("Could not open folder: {error}");
+                return;
+            }
+        };
+        let (send, receive) = mpsc::channel();
+        let scan_path = path.clone();
+        let subfolders = self.preferences.subfolders;
+        self.playing = false;
+        self.status = "Scanning folder…".into();
+        self.generation += 1;
+        self.loading = false;
+        std::thread::spawn(move || {
+            let _ = send.send(photos::folder(&scan_path, subfolders));
+        });
+        self.scanning = Some((path, receive));
+    }
+
+    fn poll_folder(&mut self) -> bool {
+        let Some((_, receive)) = &self.scanning else { return false; };
+        let result = match receive.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(std::io::Error::other("Folder scan stopped"))
+            }
+        };
+        let (path, _) = self.scanning.take().unwrap();
+        match result {
             Ok(files) => {
                 self.files = files;
+                self.folder_epoch += 1;
                 self.index = 0;
                 self.frame = None;
                 self.thumbs.clear();
                 self.failed.clear();
-                if self.shuffle.is_some() { self.reset_shuffle(); }
                 self.playing = false;
+                if self.shuffle.is_some() { self.reset_shuffle(); }
+                self.active_folder = Some(path.clone());
+                self.preferences.remember(path);
                 self.status = if self.files.is_empty() { "This folder has no JPEG, PNG, or BMP photos.".into() } else { String::new() };
+                self.save_preferences();
                 self.request();
             }
             Err(error) => self.status = format!("Could not open folder: {error}"),
+        }
+        true
+    }
+
+    fn save_preferences(&mut self) {
+        self.preferences.interval = self.interval;
+        self.preferences.looping = self.loop_slides;
+        self.preferences.shuffled = self.shuffle.is_some();
+        if let Err(error) = self.preferences.save() {
+            self.status = format!("Could not save preferences: {error}");
         }
     }
 
@@ -104,7 +161,7 @@ impl App {
             None => self.next_index(1),
         };
         let prefetch = upcoming.map(|i| self.files[i].clone());
-        self.worker.request(Job { generation: self.generation, selected, thumbs, prefetch });
+        self.worker.request(Job { generation: self.generation, folder_epoch: self.folder_epoch, selected, thumbs, prefetch });
     }
 
     fn reset_shuffle(&mut self) {
@@ -142,6 +199,7 @@ impl App {
     }
 
     fn step(&mut self, direction: isize) {
+        if self.scanning.is_some() { return; }
         let next = match &mut self.shuffle {
             Some(shuffle) => shuffle.step(direction, self.files.len(), self.loop_slides, &self.failed),
             None => self.next_index(direction),
@@ -154,6 +212,7 @@ impl App {
     }
 
     fn toggle(&mut self) {
+        if self.scanning.is_some() { return; }
         if self.files.len() > 1 {
             self.playing = !self.playing;
             self.reset_timer();
@@ -161,7 +220,8 @@ impl App {
     }
 
     fn tick(&mut self) -> bool {
-        let mut redraw = false;
+        let mut redraw = self.poll_folder();
+        if self.scanning.is_some() { return redraw; }
         while let Ok((generation, output)) = self.worker.results.try_recv() {
             if generation != self.generation { continue; }
             match output {
@@ -462,13 +522,13 @@ unsafe fn fullscreen(window: Handle) {
 }
 
 unsafe fn settings(window: Handle, action: Action) {
-    let (interval, looping, shuffled, mut point) = APP.with(|state| {
+    let (interval, looping, shuffled, subfolders, recent, mut point) = APP.with(|state| {
         let state = state.borrow();
         let app = state.as_ref().unwrap();
         let layout = Layout::new(client(window), dpi(window), app);
         let bounds = layout.controls.iter().find(|(item, _)| *item == action)
             .map(|(_, bounds)| *bounds).unwrap_or_default();
-        (app.interval, app.loop_slides, app.shuffle.is_some(), Point { x: bounds.left, y: bounds.bottom })
+        (app.interval, app.loop_slides, app.shuffle.is_some(), app.preferences.subfolders, app.preferences.recent.clone(), Point { x: bounds.left, y: bounds.bottom })
     });
     let menu = CreatePopupMenu();
     if menu.is_null() { return; }
@@ -480,6 +540,15 @@ unsafe fn settings(window: Handle, action: Action) {
         AppendMenuW(menu, 0x800, 0, null());
         AppendMenuW(menu, if looping { 8 } else { 0 }, 5, wide("Loop slideshow").as_ptr());
         AppendMenuW(menu, if shuffled { 8 } else { 0 }, 6, wide("Shuffle slideshow").as_ptr());
+        AppendMenuW(menu, if subfolders { 8 } else { 0 }, 7, wide("Include subfolders").as_ptr());
+        if !recent.is_empty() {
+            AppendMenuW(menu, 0x800, 0, null());
+            AppendMenuW(menu, 0x02, 0, wide("Recent folders").as_ptr());
+            for (index, path) in recent.iter().enumerate() {
+                let label = path.to_string_lossy().replace('&', "&&");
+                AppendMenuW(menu, 0, 10 + index, wide(&label).as_ptr());
+            }
+        }
     }
     ClientToScreen(window, &mut point);
     let command = TrackPopupMenu(menu, 0x180, point.x, point.y, 0, window, null());
@@ -500,9 +569,36 @@ unsafe fn settings(window: Handle, action: Action) {
                     app.reset_shuffle();
                 }
             }
-            _ => {}
+            7 => {
+                app.preferences.subfolders = !app.preferences.subfolders;
+                let path = app.scanning.as_ref().map(|(path, _)| path.clone())
+                    .or_else(|| app.active_folder.clone());
+                if let Some(path) = path { app.set_folder(path); }
+            }
+            id if (10..10 + MAX_RECENT as u32).contains(&id) => {
+                if let Some(path) = recent.get((id - 10) as usize) {
+                    app.set_folder(path.clone());
+                }
+                return;
+            }
+            _ => return,
         }
+        app.save_preferences();
     });
+}
+
+unsafe fn dropped_folder(drop: Handle) -> Option<PathBuf> {
+    let count = DragQueryFileW(drop, u32::MAX, null_mut(), 0);
+    let path = (0..count).find_map(|index| {
+        let length = DragQueryFileW(drop, index, null_mut(), 0);
+        let mut buffer = vec![0; length as usize + 1];
+        let written = DragQueryFileW(drop, index, buffer.as_mut_ptr(), length + 1);
+        if written == 0 { return None; }
+        let path = PathBuf::from(OsString::from_wide(&buffer[..written as usize]));
+        path.is_dir().then_some(path)
+    });
+    DragFinish(drop);
+    path
 }
 
 unsafe fn activate(window: Handle, action: Action) {
@@ -534,7 +630,7 @@ unsafe fn activate(window: Handle, action: Action) {
                 Action::Previous => app.step(-1),
                 Action::Next => app.step(1),
                 Action::Play => app.toggle(),
-                Action::Thumb(index) if index < app.files.len() => {
+                Action::Thumb(index) if app.scanning.is_none() && index < app.files.len() => {
                     if let Some(shuffle) = &mut app.shuffle { shuffle.jump(index); }
                     app.select(index);
                 }
@@ -629,6 +725,19 @@ unsafe extern "system" fn window_proc(window: Handle, msg: u32, wp: usize, lp: i
             if let Some(action) = action { activate(window, action); }
             InvalidateRect(window, null(), 0);
         }
+        0x0233 => {
+            let folder = dropped_folder(wp as Handle);
+            APP.with(|state| {
+                if let Some(app) = state.borrow_mut().as_mut() {
+                    if let Some(path) = folder {
+                        app.set_folder(path);
+                    } else {
+                        app.status = "Drop a folder containing photos.".into();
+                    }
+                }
+            });
+            InvalidateRect(window, null(), 0);
+        }
         0x02e0 => {
             let bounds = *(lp as *const Rect);
             let full = APP.with(|state| state.try_borrow().ok().and_then(|s| s.as_ref().map(App::fullscreen)).unwrap_or(false));
@@ -664,14 +773,17 @@ fn main() {
             MessageBoxW(null_mut(), wide("Could not create the Another Photo Slideshow Viewer window.").as_ptr(),
                 wide("Another Photo Slideshow Viewer").as_ptr(), 0x10);
         } else {
-            let mut app = App::new();
-            if let Some(path) = std::env::args_os().nth(1) {
-                app.set_folder(PathBuf::from(path));
+            let mut app = App::new(Preferences::load());
+            let initial = std::env::args_os().nth(1).map(PathBuf::from)
+                .or_else(|| app.preferences.recent.first().cloned());
+            if let Some(path) = initial {
+                app.set_folder(path);
             }
             APP.with(|state| *state.borrow_mut() = Some(app));
             let dark = 1i32;
             DwmSetWindowAttribute(window, 20, (&dark as *const i32).cast(), 4);
             SetTimer(window, 1, 45, null_mut());
+            DragAcceptFiles(window, 1);
             ShowWindow(window, 5);
             let mut message: Message = zeroed();
             while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {

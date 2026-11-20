@@ -15,19 +15,33 @@ pub struct Photo {
     pub pixels: Vec<u8>,
 }
 
-pub fn folder(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files: Vec<_> = fs::read_dir(path)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .map(|entry| entry.path())
-        .filter(|path| {
-            matches!(
-                path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(),
-                Some("jpg" | "jpeg" | "png" | "bmp")
-            )
-        })
-        .collect();
-    files.sort_by_cached_key(|p| (p.file_name().unwrap_or_default().to_string_lossy().to_lowercase(), p.clone()));
+pub fn folder(path: &Path, subfolders: bool) -> io::Result<Vec<PathBuf>> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut files = Vec::new();
+    let mut pending = Vec::new();
+    let mut entries = fs::read_dir(path)?;
+    loop {
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(kind) = entry.file_type() else { continue; };
+            if subfolders && kind.is_dir()
+                && entry.metadata().is_ok_and(|meta| meta.file_attributes() & 0x400 == 0)
+            {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let path = entry.path();
+                if matches!(
+                    path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                    Some("jpg" | "jpeg" | "png" | "bmp")
+                ) {
+                    files.push(path);
+                }
+            }
+        }
+        let Some(children) = std::iter::from_fn(|| pending.pop()).find_map(|path| fs::read_dir(path).ok()) else { break; };
+        entries = children;
+    }
+    files.sort_by_cached_key(|p| (p.to_string_lossy().to_lowercase(), p.clone()));
     Ok(files)
 }
 
@@ -72,6 +86,7 @@ fn decode(path: &Path, bounds: (u32, u32)) -> Result<Photo, String> {
 
 pub struct Job {
     pub generation: u64,
+    pub folder_epoch: u64,
     pub selected: Option<(usize, PathBuf)>,
     pub thumbs: Vec<(usize, PathBuf)>,
     pub prefetch: Option<PathBuf>,
@@ -97,9 +112,14 @@ impl Worker {
         let latest = Arc::clone(&generation);
         std::thread::spawn(move || {
             let mut cache = None;
+            let mut folder_epoch = None;
             while let Ok(mut job) = requests.recv() {
                 while let Ok(replacement) = requests.try_recv() {
                     job = replacement;
+                }
+                if folder_epoch != Some(job.folder_epoch) {
+                    cache = None;
+                    folder_epoch = Some(job.folder_epoch);
                 }
                 let current = || latest.load(Relaxed) == job.generation;
                 let send = |output| responses.send((job.generation, output)).is_ok();
@@ -169,9 +189,15 @@ mod tests {
             pixels.save(dir.0.join(name)).unwrap();
         }
         fs::write(dir.0.join("notes.txt"), "ignored").unwrap();
-        fs::create_dir(dir.0.join("subfolder.png")).unwrap();
+        let nested = dir.0.join("subfolder.png");
+        fs::create_dir(&nested).unwrap();
+        let nested_path = nested.join("04.png");
+        pixels.save(&nested_path).unwrap();
+        let recursive = folder(&dir.0, true).unwrap();
+        assert_eq!(recursive.len(), 4);
+        assert!(recursive.contains(&nested_path));
 
-        let paths = folder(&dir.0).unwrap();
+        let paths = folder(&dir.0, false).unwrap();
         assert_eq!(
             paths,
             ["01.jpeg", "02.png", "03.bmp"].map(|name| dir.0.join(name))

@@ -138,6 +138,9 @@ extern "system" {
 
 #[link(name = "shell32")]
 extern "system" {
+    pub fn DragAcceptFiles(window: Handle, accept: i32);
+    pub fn DragQueryFileW(drop: Handle, index: u32, path: *mut u16, length: u32) -> u32;
+    pub fn DragFinish(drop: Handle);
     pub fn SHBrowseForFolderW(info: *mut Browse) -> Handle;
     pub fn SHGetPathFromIDListEx(pidl: Handle, path: *mut u16, length: u32, flags: u32) -> i32;
 }
