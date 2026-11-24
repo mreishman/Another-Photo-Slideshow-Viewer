@@ -20,7 +20,7 @@ use std::{
     sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
-use view::View;
+use view::{Mode, View};
 use win::*;
 
 const BACK: u32 = 0x14100e;
@@ -321,7 +321,7 @@ impl Layout {
             }
         } else {
             controls.push((Action::Open, Rect::new(d(14), d(7), d(133), d(35))));
-            controls.push((Action::Display, Rect::new(w - d(232), d(7), d(108), d(35))));
+            controls.push((Action::Display, Rect::new(w - d(252), d(7), d(128), d(35))));
             controls.push((Action::Settings, Rect::new(w - d(112), d(7), d(98), d(35))));
             let start = app.first_thumb();
             let slots = (app.files.len() - start).min(5) as i32;
@@ -345,7 +345,7 @@ impl Layout {
                 controls.push((action, Rect::new(left + d(67) * i as i32, top, d(59), d(38))));
             }
             if full {
-                controls.push((Action::Display, Rect::new(d(14), top, d(112), d(38))));
+                controls.push((Action::Display, Rect::new(d(14), top, d(128), d(38))));
                 controls.push((Action::Fullscreen, Rect::new(w - d(158), top, d(144), d(38))));
             } else {
                 controls.push((Action::Interval, Rect::new(w / 2 + d(21), top, d(86), d(38))));
@@ -461,7 +461,7 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
             Action::Play => "\u{25b6}".to_owned(),
             Action::Next => "\u{23ed}".to_owned(),
             Action::Interval => format!("{} s  \u{25be}", app.interval),
-            Action::Display => app.view.mode.label().to_owned(),
+            Action::Display => format!("{}  \u{25be}", app.view.mode.label()),
             Action::Fullscreen if app.fullscreen() => "Exit fullscreen".to_owned(),
             Action::Fullscreen => "\u{26f6}".to_owned(),
             Action::Thumb(_) => continue,
@@ -643,6 +643,39 @@ unsafe fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
     paths
 }
 
+unsafe fn display_menu(window: Handle) {
+    let Some((mode, mut anchor, alignment)) = APP.with(|state| {
+        let mut state = state.borrow_mut();
+        let app = state.as_mut()?;
+        app.reveal();
+        let layout = Layout::new(client(window), dpi(window), app);
+        let (_, bounds) = layout.controls.iter().find(|(action, _)| *action == Action::Display)?;
+        // Open above the fullscreen button and below the windowed button.
+        let (y, alignment) = if app.fullscreen() { (bounds.top, 0x20) } else { (bounds.bottom, 0) };
+        Some((app.view.mode, Point { x: bounds.left, y }, alignment))
+    }) else { return; };
+    let menu = CreatePopupMenu();
+    if menu.is_null() { return; }
+    for (index, option) in Mode::ALL.into_iter().enumerate() {
+        AppendMenuW(menu, if option == mode { 8 } else { 0 }, index + 1, wide(option.label()).as_ptr());
+    }
+    InvalidateRect(window, null(), 0);
+    ClientToScreen(window, &mut anchor);
+    let command = TrackPopupMenu(menu, 0x180 | alignment, anchor.x, anchor.y, 0, window, null());
+    DestroyMenu(menu);
+    APP.with(|state| {
+        if let Some(app) = state.borrow_mut().as_mut() {
+            if let Some(&selected) = command.checked_sub(1).and_then(|index| Mode::ALL.get(index as usize)) {
+                if selected != app.view.mode {
+                    app.view.mode = selected;
+                    app.view.reset();
+                }
+            }
+            app.reveal();
+        }
+    });
+}
+
 unsafe fn activate(window: Handle, action: Action) {
     match action {
         Action::Open => {
@@ -665,6 +698,7 @@ unsafe fn activate(window: Handle, action: Action) {
         }
         Action::Settings | Action::Interval => settings(window, action),
         Action::Fullscreen => fullscreen(window),
+        Action::Display => display_menu(window),
         action => APP.with(|state| {
             let mut state = state.borrow_mut();
             let app = state.as_mut().unwrap();
@@ -672,10 +706,6 @@ unsafe fn activate(window: Handle, action: Action) {
                 Action::Previous => app.step(-1),
                 Action::Next => app.step(1),
                 Action::Play => app.toggle(),
-                Action::Display => {
-                    app.view.mode = app.view.mode.next();
-                    app.view.reset();
-                }
                 Action::Thumb(index) if app.scanning.is_none() && index < app.files.len() => {
                     if let Some(shuffle) = &mut app.shuffle { shuffle.jump(index); }
                     app.select(index);

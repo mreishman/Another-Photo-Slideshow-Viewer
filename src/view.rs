@@ -1,6 +1,6 @@
 use crate::win::{Point, Rect};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
     Fit,
@@ -10,14 +10,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Fit => Self::Fill,
-            Self::Fill => Self::Actual,
-            Self::Actual => Self::Stretch,
-            Self::Stretch => Self::Fit,
-        }
-    }
+    pub const ALL: [Self; 4] = [Self::Fit, Self::Fill, Self::Actual, Self::Stretch];
 
     pub fn label(self) -> &'static str {
         match self {

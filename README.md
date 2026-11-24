@@ -52,7 +52,7 @@ saved for the current Windows user.
 
 ## Viewing controls
 
-Click the display mode button or press **M** to cycle through **Fit**, **Fill**,
+Click the display mode dropdown or press **M** to choose from **Fit**, **Fill**,
 **Actual Size**, and **Stretch**. Fit shows the entire photo at its original
 proportions. Fill crops to cover the canvas, Actual Size shows one image pixel
 per screen pixel, and Stretch covers the canvas without preserving proportions.
