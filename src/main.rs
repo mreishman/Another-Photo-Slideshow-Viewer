@@ -3,6 +3,7 @@
 mod photos;
 mod preferences;
 mod shuffle;
+mod view;
 mod win;
 
 use photos::{Job, Output, Photo, Worker};
@@ -19,6 +20,7 @@ use std::{
     sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
+use view::{Mode, View};
 use win::*;
 
 const BACK: u32 = 0x14100e;
@@ -41,6 +43,8 @@ struct App {
     files: Vec<PathBuf>,
     index: usize,
     frame: Option<Arc<Photo>>,
+    view: View,
+    drag: Option<Point>,
     thumbs: HashMap<usize, Option<Photo>>,
     failed: HashSet<usize>,
     worker: Worker,
@@ -59,7 +63,7 @@ struct App {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Action { Open, Settings, Previous, Play, Next, Interval, Fullscreen, Thumb(usize) }
+enum Action { Open, Settings, Previous, Play, Next, Interval, Display, Fullscreen, Thumb(usize) }
 
 impl App {
     fn new(preferences: Preferences) -> Self {
@@ -68,7 +72,7 @@ impl App {
         let loop_slides = preferences.looping;
         Self {
             preferences, active_folder: None, scanning: None, folder_epoch: 0,
-            files: Vec::new(), index: 0, frame: None, thumbs: HashMap::new(),
+            files: Vec::new(), index: 0, frame: None, view: View::default(), drag: None, thumbs: HashMap::new(),
             failed: HashSet::new(), worker: Worker::new(), generation: 0,
             playing: false, loading: false, interval, deadline: Instant::now(),
             status: String::new(), loop_slides, shuffle, placement: None,
@@ -133,6 +137,7 @@ impl App {
         self.folder_epoch += 1;
         self.index = 0;
         self.frame = None;
+        self.view.reset();
         self.thumbs.clear();
         self.failed.clear();
         self.playing = false;
@@ -257,6 +262,7 @@ impl App {
                     match result {
                         Ok(photo) => {
                             self.failed.remove(&index);
+                            self.view.reset();
                             self.frame = Some(photo);
                             self.reset_timer();
                         }
@@ -296,7 +302,7 @@ struct Layout {
     tray: Rect,
     controls: Vec<(Action, Rect)>,
     counter: Rect,
-    hint: Rect,
+
 }
 
 impl Layout {
@@ -312,10 +318,10 @@ impl Layout {
             Self {
                 canvas: area, bar: Rect::default(), tray: Rect::default(), controls: Vec::new(),
                 counter: Rect::new(w / 2 + d(71), h - d(61), d(75), d(38)),
-                hint: Rect::new((w - d(168)).max(0), h - d(54), d(153), d(27)),
             }
         } else {
             controls.push((Action::Open, Rect::new(d(14), d(7), d(133), d(35))));
+            controls.push((Action::Display, Rect::new(w - d(252), d(7), d(128), d(35))));
             controls.push((Action::Settings, Rect::new(w - d(112), d(7), d(98), d(35))));
             let start = app.first_thumb();
             let slots = (app.files.len() - start).min(5) as i32;
@@ -329,7 +335,7 @@ impl Layout {
                 bar: Rect::new(0, 0, w, d(48)),
                 tray: Rect::new(0, tray_top, w, tray_height), controls: Vec::new(),
                 counter: Rect::new(w / 2 + d(119), footer + d(10), d(82), d(38)),
-                hint: Rect::default(),
+
             }
         };
         if !full || app.overlay() {
@@ -338,7 +344,10 @@ impl Layout {
             for (i, action) in [Action::Previous, Action::Play, Action::Next].into_iter().enumerate() {
                 controls.push((action, Rect::new(left + d(67) * i as i32, top, d(59), d(38))));
             }
-            if !full {
+            if full {
+                controls.push((Action::Display, Rect::new(d(14), top, d(128), d(38))));
+                controls.push((Action::Fullscreen, Rect::new(w - d(158), top, d(144), d(38))));
+            } else {
                 controls.push((Action::Interval, Rect::new(w / 2 + d(21), top, d(86), d(38))));
                 controls.push((Action::Fullscreen, Rect::new(w - d(62), top, d(48), d(38))));
             }
@@ -373,17 +382,16 @@ unsafe fn label(dc: Handle, mut area: Rect, value: &str, color: u32) {
 
 unsafe fn fitted(dc: Handle, area: Rect, photo: &Photo) {
     if area.width() <= 0 || area.height() <= 0 { return; }
-    let ratio = (f64::from(area.width()) / f64::from(photo.width))
-        .min(f64::from(area.height()) / f64::from(photo.height));
-    let w = (f64::from(photo.width) * ratio).round().max(1.0) as i32;
-    let h = (f64::from(photo.height) * ratio).round().max(1.0) as i32;
+    blit_photo(dc, View::default().destination(area, photo.width, photo.height), photo);
+}
+
+unsafe fn blit_photo(dc: Handle, dest: Rect, photo: &Photo) {
     let info = Bitmap {
         size: size_of::<Bitmap>() as u32, width: photo.width, height: -photo.height,
         planes: 1, bits: 32, compression: 0, image_size: 0, xppm: 0, yppm: 0,
         used: 0, important: 0,
     };
-    StretchDIBits(dc, area.left + (area.width() - w) / 2,
-        area.top + (area.height() - h) / 2, w, h, 0, 0, photo.width, photo.height,
+    StretchDIBits(dc, dest.left, dest.top, dest.width(), dest.height(), 0, 0, photo.width, photo.height,
         photo.pixels.as_ptr().cast(), &info, 0, 0x00CC0020);
 }
 
@@ -400,7 +408,15 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
     SetStretchBltMode(dc, 3);
     fill(dc, area, BACK);
     if let Some(photo) = &app.frame {
-        fitted(dc, layout.canvas, photo);
+        let viewport = layout.canvas;
+        if viewport.width() > 0 && viewport.height() > 0 {
+            let saved = SaveDC(dc);
+            if saved != 0 {
+                IntersectClipRect(dc, viewport.left, viewport.top, viewport.right, viewport.bottom);
+                blit_photo(dc, app.view.destination(viewport, photo.width, photo.height), photo);
+                RestoreDC(dc, saved);
+            }
+        }
     } else if app.status.is_empty() {
         let prompt = if app.loading { "Loading photo…" } else { "Open a folder to view your photos" };
         label(dc, layout.canvas, prompt, MUTED);
@@ -413,8 +429,6 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
         fill(dc, Rect::new(0, footer_top, area.width(), d(1).max(1)), LINE);
     } else if app.overlay() {
         fill(dc, Rect::new(area.width() / 2 - d(156), area.bottom - d(68), d(315), d(52)), PANEL);
-        fill(dc, layout.hint, PANEL);
-        label(dc, layout.hint, "Esc  Exit fullscreen", TEXT);
     }
     for (action, bounds) in layout.controls {
         if let Action::Thumb(index) = action {
@@ -438,16 +452,18 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
         let border = if app.focus == Some(action) { ACCENT } else { LINE };
         let face = if bounds.contains(app.pointer) && !disabled { rgb(57, 67, 77) } else { rgb(42, 49, 57) };
         fill(dc, bounds, border);
-        fill(dc, inset(bounds, d(1).max(1)), face);
+        fill(dc, inset(bounds, d(if app.focus == Some(action) { 2 } else { 1 }).max(1)), face);
         let caption = match action {
             Action::Open => "Open folder".to_owned(),
             Action::Settings => "Settings".to_owned(),
-            Action::Previous => "◀|".to_owned(),
-            Action::Play if app.playing => "Ⅱ".to_owned(),
-            Action::Play => "▶".to_owned(),
-            Action::Next => "|▶".to_owned(),
-            Action::Interval => format!("{} s  ▾", app.interval),
-            Action::Fullscreen => "⛶".to_owned(),
+            Action::Previous => "\u{23ee}".to_owned(),
+            Action::Play if app.playing => "\u{23f8}".to_owned(),
+            Action::Play => "\u{25b6}".to_owned(),
+            Action::Next => "\u{23ed}".to_owned(),
+            Action::Interval => format!("{} s  \u{25be}", app.interval),
+            Action::Display => format!("{}  \u{25be}", app.view.mode.label()),
+            Action::Fullscreen if app.fullscreen() => "Exit fullscreen".to_owned(),
+            Action::Fullscreen => "\u{26f6}".to_owned(),
             Action::Thumb(_) => continue,
         };
         label(dc, bounds, &caption, if disabled { MUTED } else { TEXT });
@@ -627,6 +643,39 @@ unsafe fn dropped_paths(drop: Handle) -> Vec<PathBuf> {
     paths
 }
 
+unsafe fn display_menu(window: Handle) {
+    let Some((mode, mut anchor, alignment)) = APP.with(|state| {
+        let mut state = state.borrow_mut();
+        let app = state.as_mut()?;
+        app.reveal();
+        let layout = Layout::new(client(window), dpi(window), app);
+        let (_, bounds) = layout.controls.iter().find(|(action, _)| *action == Action::Display)?;
+        // Open above the fullscreen button and below the windowed button.
+        let (y, alignment) = if app.fullscreen() { (bounds.top, 0x20) } else { (bounds.bottom, 0) };
+        Some((app.view.mode, Point { x: bounds.left, y }, alignment))
+    }) else { return; };
+    let menu = CreatePopupMenu();
+    if menu.is_null() { return; }
+    for (index, option) in Mode::ALL.into_iter().enumerate() {
+        AppendMenuW(menu, if option == mode { 8 } else { 0 }, index + 1, wide(option.label()).as_ptr());
+    }
+    InvalidateRect(window, null(), 0);
+    ClientToScreen(window, &mut anchor);
+    let command = TrackPopupMenu(menu, 0x180 | alignment, anchor.x, anchor.y, 0, window, null());
+    DestroyMenu(menu);
+    APP.with(|state| {
+        if let Some(app) = state.borrow_mut().as_mut() {
+            if let Some(&selected) = command.checked_sub(1).and_then(|index| Mode::ALL.get(index as usize)) {
+                if selected != app.view.mode {
+                    app.view.mode = selected;
+                    app.view.reset();
+                }
+            }
+            app.reveal();
+        }
+    });
+}
+
 unsafe fn activate(window: Handle, action: Action) {
     match action {
         Action::Open => {
@@ -649,6 +698,7 @@ unsafe fn activate(window: Handle, action: Action) {
         }
         Action::Settings | Action::Interval => settings(window, action),
         Action::Fullscreen => fullscreen(window),
+        Action::Display => display_menu(window),
         action => APP.with(|state| {
             let mut state = state.borrow_mut();
             let app = state.as_mut().unwrap();
@@ -672,6 +722,20 @@ unsafe fn key(window: Handle, key: usize) -> bool {
     let action = match key {
         0x4f if GetKeyState(0x11) < 0 => Some(Action::Open),
         0x7a => Some(Action::Fullscreen),
+        0x4d => Some(Action::Display),
+        0x30 | 0x60 | 0x6b | 0xbb | 0x6d | 0xbd => {
+            APP.with(|state| {
+                if let Some(app) = state.borrow_mut().as_mut() {
+                    match key {
+                        0x30 | 0x60 => app.view.reset(),
+                        0x6b | 0xbb => app.view.zoom(1.0),
+                        _ => app.view.zoom(-1.0),
+                    }
+                }
+            });
+            InvalidateRect(window, null(), 0);
+            return true;
+        }
         0x25 => Some(Action::Previous),
         0x27 => Some(Action::Next),
         0x20 => Some(Action::Play),
@@ -734,20 +798,52 @@ unsafe extern "system" fn window_proc(window: Handle, msg: u32, wp: usize, lp: i
             let redraw = APP.with(|state| state.borrow_mut().as_mut().is_some_and(App::tick));
             if redraw { InvalidateRect(window, null(), 0); }
         }
-        0x0200 | 0x0202 => {
+        0x020a => {
+            APP.with(|state| {
+                if let Some(app) = state.borrow_mut().as_mut() {
+                    if app.frame.is_some() {
+                        app.view.zoom(f64::from((wp >> 16) as i16) / 120.0);
+                    }
+                }
+            });
+            InvalidateRect(window, null(), 0);
+        }
+        0x0215 => {
+            APP.with(|state| {
+                if let Some(app) = state.borrow_mut().as_mut() { app.drag = None; }
+            });
+        }
+        0x0200..=0x0202 => {
             let pointer = Point { x: lp as i16 as i32, y: (lp >> 16) as i16 as i32 };
             let action = APP.with(|state| {
                 let mut state = state.borrow_mut();
                 let app = state.as_mut()?;
                 app.pointer = pointer;
+                if msg == 0x0200 {
+                    if let (Some(last), Some(photo)) = (app.drag, &app.frame) {
+                        let canvas = Layout::new(client(window), dpi(window), app).canvas;
+                        app.view.pan(canvas, photo.width, photo.height, pointer.x - last.x, pointer.y - last.y);
+                        app.drag = Some(pointer);
+                    }
+                }
                 let layout = Layout::new(client(window), dpi(window), app);
                 app.reveal();
+                if msg == 0x0201 && app.frame.is_some() && layout.canvas.contains(pointer)
+                    && !layout.controls.iter().any(|(_, rect)| rect.contains(pointer))
+                {
+                    app.drag = Some(pointer);
+                }
                 if msg == 0x0202 {
                     app.focus = None;
+                    if app.drag.take().is_some() { return None; }
                     return layout.controls.into_iter().find(|(_, rect)| rect.contains(pointer)).map(|(action, _)| action);
                 }
                 None
             });
+            if msg == 0x0201 && APP.with(|state| state.borrow().as_ref().is_some_and(|app| app.drag.is_some())) {
+                SetCapture(window);
+            }
+            if msg == 0x0202 { ReleaseCapture(); }
             if let Some(action) = action { activate(window, action); }
             InvalidateRect(window, null(), 0);
         }

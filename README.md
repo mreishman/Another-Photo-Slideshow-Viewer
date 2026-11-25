@@ -50,6 +50,18 @@ The viewer restores the last folder at startup unless you pass a folder on the
 command line. Slide interval, looping, shuffle, and subfolder preferences are
 saved for the current Windows user.
 
+## Viewing controls
+
+Click the display mode dropdown or press **M** to choose from **Fit**, **Fill**,
+**Actual Size**, and **Stretch**. Fit shows the entire photo at its original
+proportions. Fill crops to cover the canvas, Actual Size shows one image pixel
+per screen pixel, and Stretch covers the canvas without preserving proportions.
+
+Use the mouse wheel or **+** and **−** to zoom, drag the photo to pan, and
+press **0** to reset. The mode stays selected when the slideshow advances.
+Move the mouse or press Tab in fullscreen to reveal **Exit fullscreen**,
+or press **Esc** at any time.
+
 ## Code
 
 - `src/main.rs` contains window messages, controls, layout, drawing, and slideshow state.
