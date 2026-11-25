@@ -128,7 +128,7 @@ impl Worker {
                 if let Some((index, path)) = job.selected.filter(|_| current()) {
                     let photo = match &cache {
                         Some((cached_path, photo)) if *cached_path == path => Ok(Arc::clone(photo)),
-                        _ => decode(&path, (3840, 2160)).map(Arc::new),
+                        _ => decode(&path, (16_384, 16_384)).map(Arc::new),
                     };
                     if !send(Output::Selected(index, photo)) { return; }
                 }
@@ -137,7 +137,7 @@ impl Worker {
                     if !send(Output::Thumb(index, decode(&path, (256, 144)).ok())) { return; }
                 }
                 if let Some(path) = job.prefetch.filter(|_| current()) {
-                    if let Ok(photo) = decode(&path, (3840, 2160)).map(Arc::new) {
+                    if let Ok(photo) = decode(&path, (16_384, 16_384)).map(Arc::new) {
                         cache = Some((path, photo));
 
                     }

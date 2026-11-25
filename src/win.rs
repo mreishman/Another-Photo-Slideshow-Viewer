@@ -97,6 +97,8 @@ extern "system" {
     pub fn InvalidateRect(w: Handle, rect: *const Rect, erase: i32) -> i32;
     pub fn FillRect(dc: Handle, area: *const Rect, brush: Handle) -> i32;
     pub fn DrawTextW(dc: Handle, text: *const u16, len: i32, rect: *mut Rect, flags: u32) -> i32;
+    pub fn SetCapture(window: Handle) -> Handle;
+    pub fn ReleaseCapture() -> i32;
     pub fn SetTimer(w: Handle, id: usize, ms: u32, callback: Handle) -> usize;
     pub fn KillTimer(w: Handle, id: usize) -> i32;
     pub fn GetKeyState(key: i32) -> i16;
@@ -119,6 +121,9 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
+    pub fn SaveDC(dc: Handle) -> i32;
+    pub fn RestoreDC(dc: Handle, saved: i32) -> i32;
+    pub fn IntersectClipRect(dc: Handle, left: i32, top: i32, right: i32, bottom: i32) -> i32;
     pub fn CreateSolidBrush(color: u32) -> Handle;
     pub fn DeleteObject(object: Handle) -> i32;
     pub fn CreateCompatibleDC(dc: Handle) -> Handle;

@@ -1,6 +1,6 @@
 # Roadmap
 
-## 0.4.0 — Viewing controls and UI
+## 0.4.0 — Viewing controls and UI (implemented)
 
 - Refine the layout, spacing, icons, and keyboard focus cues in the windowed and fullscreen controls.
 - Add a clearly labeled **Exit fullscreen** button to the fullscreen controls. Keep Esc available and reveal the button with pointer movement or keyboard navigation.
