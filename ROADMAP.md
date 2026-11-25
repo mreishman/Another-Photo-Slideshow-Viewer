@@ -7,7 +7,7 @@
 - Add **Fit**, **Fill**, **Actual Size**, and **Stretch** display modes. Keep the selected mode as the slideshow advances.
 - Add manual zoom with the mouse wheel and keyboard, and pan by dragging. Reset manual zoom and pan when a new photo opens.
 
-## 0.5.0 — Reliable playback
+## 0.5.0 — Reliable playback (implemented)
 
 - Skip unreadable photos during manual navigation and summarize skipped files.
 - Keep shuffle history limited to photos that appeared on screen.
