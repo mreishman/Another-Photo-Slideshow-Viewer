@@ -15,11 +15,14 @@
 
 ## 0.6.0 — Easier browsing
 
-- Add a thumbnail grid with filename search and sorting by name or date modified.
+- Add a **Clear recent folders** button that clears saved folder history while keeping the current slideshow open.
+- Add a horizontal scrollbar beneath the thumbnail strip to browse the full slideshow.
+- Add a grid view for all thumbnails, with filename search and sorting by name or date modified.
 - Start the slideshow from any photo selected in the grid.
 
 ## 0.7.0 — Saved slideshows
 
+- Add an **Add folders** control to combine photos from multiple folders in the current slideshow.
 - Save and reopen named playlists that reference photos across multiple folders.
 - Reorder playlist slides while keeping the original photos in place.
 
@@ -27,6 +30,7 @@
 
 - Add optional crossfades and custom slide durations.
 - Add a fullscreen monitor picker.
+- Offer selectable upscaling filters for photos enlarged by the viewer, such as nearest-neighbor, bilinear, and bicubic.
 - Keep manual keyboard navigation immediate when transitions are enabled.
 
 ## 0.9.0 — Release polish
