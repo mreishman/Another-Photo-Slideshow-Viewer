@@ -42,6 +42,8 @@ struct App {
     folder_epoch: u64,
     files: Vec<PathBuf>,
     index: usize,
+    shown: Option<usize>,
+    direction: isize,
     frame: Option<Arc<Photo>>,
     view: View,
     drag: Option<Point>,
@@ -67,12 +69,12 @@ enum Action { Open, Settings, Previous, Play, Next, Interval, Display, Fullscree
 
 impl App {
     fn new(preferences: Preferences) -> Self {
-        let shuffle = preferences.shuffled.then(|| Shuffle::new(0, 0, &HashSet::new()));
+        let shuffle = preferences.shuffled.then(|| Shuffle::new(0, None, &HashSet::new()));
         let interval = preferences.interval;
         let loop_slides = preferences.looping;
         Self {
             preferences, active_folder: None, scanning: None, folder_epoch: 0,
-            files: Vec::new(), index: 0, frame: None, view: View::default(), drag: None, thumbs: HashMap::new(),
+            files: Vec::new(), index: 0, shown: None, direction: 1, frame: None, view: View::default(), drag: None, thumbs: HashMap::new(),
             failed: HashSet::new(), worker: Worker::new(), generation: 0,
             playing: false, loading: false, interval, deadline: Instant::now(),
             status: String::new(), loop_slides, shuffle, placement: None,
@@ -101,6 +103,8 @@ impl App {
         self.status = "Scanning folder…".into();
         self.generation += 1;
         self.loading = false;
+        if let Some(shuffle) = &mut self.shuffle { shuffle.reject(); }
+        if let Some(index) = self.shown { self.index = index; }
         std::thread::spawn(move || {
             let _ = send.send(photos::folder(&scan_path, subfolders));
         });
@@ -136,6 +140,8 @@ impl App {
         self.files = files;
         self.folder_epoch += 1;
         self.index = 0;
+        self.shown = None;
+        self.direction = 1;
         self.frame = None;
         self.view.reset();
         self.thumbs.clear();
@@ -197,14 +203,15 @@ impl App {
     }
 
     fn reset_shuffle(&mut self) {
-        self.shuffle = Some(Shuffle::new(self.files.len(), self.index, &self.failed));
+        self.shuffle = Some(Shuffle::new(self.files.len(), self.shown, &self.failed));
     }
 
     fn can_step(&self, direction: isize) -> bool {
+        if self.loading || self.scanning.is_some() { return false; }
         match &self.shuffle {
             Some(shuffle) => shuffle.peek(direction, &self.failed).is_some()
                 || (direction > 0 && self.loop_slides
-                    && Shuffle::can_loop(self.files.len(), self.index, &self.failed)),
+                    && self.shown.is_some_and(|index| Shuffle::can_loop(self.files.len(), index, &self.failed))),
             None => self.next_index(direction).is_some(),
         }
     }
@@ -230,16 +237,19 @@ impl App {
         self.request();
     }
 
-    fn step(&mut self, direction: isize) {
-        if self.scanning.is_some() { return; }
+    fn step(&mut self, direction: isize) -> bool {
+        if self.loading || self.scanning.is_some() { return false; }
+        self.direction = direction;
         let next = match &mut self.shuffle {
             Some(shuffle) => shuffle.step(direction, self.files.len(), self.loop_slides, &self.failed),
             None => self.next_index(direction),
         };
         if let Some(index) = next {
             self.select(index);
-        } else if direction > 0 {
-            self.playing = false;
+            true
+        } else {
+            if direction > 0 { self.playing = false; }
+            false
         }
     }
 
@@ -262,18 +272,18 @@ impl App {
                     match result {
                         Ok(photo) => {
                             self.failed.remove(&index);
+                            if let Some(shuffle) = &mut self.shuffle { shuffle.accept(index); }
+                            self.shown = Some(index);
                             self.view.reset();
                             self.frame = Some(photo);
                             self.reset_timer();
                         }
-                        Err(error) => {
+                        Err(_) => {
                             self.failed.insert(index);
-                            let filename = self.files[index].file_name().unwrap_or_default().to_string_lossy();
-                            self.status = format!("Could not open {filename}: {error}");
-                            if self.playing && self.can_step(1) {
-                                self.step(1);
-                            } else {
+                            if let Some(shuffle) = &mut self.shuffle { shuffle.reject(); }
+                            if !self.step(self.direction) {
                                 self.playing = false;
+                                if let Some(shown) = self.shown { self.index = shown; }
                             }
                         }
                     }
@@ -469,10 +479,10 @@ unsafe fn draw(dc: Handle, area: Rect, scale: i32, app: &App) {
         label(dc, bounds, &caption, if disabled { MUTED } else { TEXT });
     }
     if !app.fullscreen() || app.overlay() {
-        let index = if app.files.is_empty() { 0 } else { app.index + 1 };
+        let index = app.shown.map_or(0, |index| index + 1);
         label(dc, layout.counter, &format!("{index} / {}", app.files.len()), TEXT);
     }
-    if !app.status.is_empty() || (app.loading && app.frame.is_some()) {
+    if !app.status.is_empty() || !app.failed.is_empty() || (app.loading && app.frame.is_some()) {
         let status = if app.status.is_empty() { "Loading photo…" } else { &app.status };
         let bounds = Rect::new(d(10), layout.canvas.top + d(10), (area.width() - d(20)).max(0), d(34));
         fill(dc, bounds, PANEL);
@@ -703,11 +713,11 @@ unsafe fn activate(window: Handle, action: Action) {
             let mut state = state.borrow_mut();
             let app = state.as_mut().unwrap();
             match action {
-                Action::Previous => app.step(-1),
-                Action::Next => app.step(1),
+                Action::Previous => { app.step(-1); }
+                Action::Next => { app.step(1); }
                 Action::Play => app.toggle(),
-                Action::Thumb(index) if app.scanning.is_none() && index < app.files.len() => {
-                    if let Some(shuffle) = &mut app.shuffle { shuffle.jump(index); }
+                Action::Thumb(index) if !app.loading && app.scanning.is_none() && index < app.files.len() => {
+                    app.direction = 1;
                     app.select(index);
                 }
                 _ => {}
@@ -977,5 +987,69 @@ mod drop_tests {
         assert!(app.active_folder.is_none() && !app.playing);
         drop(app);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+
+    fn wait_for_photo(app: &mut App) {
+        let timeout = Instant::now() + Duration::from_secs(5);
+        while app.loading && Instant::now() < timeout {
+            app.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!app.loading, "Photo worker did not finish");
+    }
+
+    #[test]
+    fn rapid_navigation_does_not_record_unshown_photos() {
+        let mut app = App::new(Preferences::default());
+        app.files = (0..4).map(|index| PathBuf::from(format!("{index}.bmp"))).collect();
+        app.shown = Some(0);
+        app.reset_shuffle();
+
+        assert!(app.step(1));
+        let pending = app.index;
+        assert!(!app.step(1));
+        assert!(!app.step(-1));
+        assert_eq!(app.index, pending);
+        assert_eq!(app.shuffle.as_ref().unwrap().peek(-1, &app.failed), None);
+    }
+
+    #[test]
+    fn manual_navigation_skips_corrupt_files_in_both_directions() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder = std::env::temp_dir().join(format!("slideshow-playback-{stamp}"));
+        std::fs::create_dir(&folder).unwrap();
+        let paths: Vec<_> = (0..3).map(|index| folder.join(format!("{index}.bmp"))).collect();
+        for index in [0, 2] {
+            image::RgbImage::from_pixel(8, 8, image::Rgb([255, 0, 0])).save(&paths[index]).unwrap();
+        }
+        std::fs::write(&paths[1], b"corrupt").unwrap();
+
+        let mut app = App::new(Preferences::default());
+        app.loop_slides = false;
+        app.open_photos(paths.clone(), None);
+        wait_for_photo(&mut app);
+        assert_eq!(app.shown, Some(0));
+        assert!(app.step(1));
+        wait_for_photo(&mut app);
+        assert_eq!(app.shown, Some(2));
+        assert_eq!(app.failed, HashSet::from([1]));
+
+        app.open_photos(paths.into_iter().rev().collect(), None);
+        wait_for_photo(&mut app);
+        app.select(2);
+        wait_for_photo(&mut app);
+        assert!(app.step(-1));
+        wait_for_photo(&mut app);
+        assert_eq!(app.shown, Some(0));
+        assert_eq!(app.failed, HashSet::from([1]));
+        assert!(!app.playing);
+        drop(app);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }
