@@ -7,21 +7,23 @@ pub struct Shuffle {
     history: Vec<usize>,
     cursor: usize,
     remaining: Vec<usize>,
+    pending_history: Option<usize>,
     random: RandomState,
     draws: u64,
 }
 
 impl Shuffle {
-    pub fn new(length: usize, current: usize, failed: &HashSet<usize>) -> Self {
+    pub fn new(length: usize, current: Option<usize>, failed: &HashSet<usize>) -> Self {
         let mut shuffle = Self {
-            history: (current < length).then_some(current).into_iter().collect(),
+            history: current.into_iter().collect(),
             cursor: 0,
             remaining: Vec::new(),
+            pending_history: None,
             random: RandomState::new(),
             draws: 0,
         };
         shuffle.refill(length, failed);
-        shuffle.remaining.retain(|&index| index != current);
+        shuffle.remaining.retain(|&index| Some(index) != current);
         shuffle
     }
 
@@ -72,17 +74,17 @@ impl Shuffle {
         failed: &HashSet<usize>,
     ) -> Option<usize> {
         if let Some(position) = self.history_position(direction, failed) {
-            self.cursor = position;
+            self.pending_history = Some(position);
             return Some(self.history[position]);
         }
         if direction < 0 {
             return None;
         }
-        while let Some(index) = self.remaining.pop() {
+        while let Some(&index) = self.remaining.last() {
             if !failed.contains(&index) {
-                self.record(index);
                 return Some(index);
             }
+            self.remaining.pop();
         }
 
         let current = *self.history.get(self.cursor)?;
@@ -94,16 +96,26 @@ impl Shuffle {
         if self.remaining[last] == current {
             self.remaining.swap(0, last);
         }
-        let index = self.remaining.pop()?;
-        self.record(index);
-        Some(index)
+        self.remaining.last().copied()
     }
 
-    pub fn jump(&mut self, index: usize) {
+    pub fn reject(&mut self) {
+        self.pending_history = None;
+    }
+
+    pub fn accept(&mut self, index: usize) {
+        if let Some(position) = self.pending_history.take() {
+            self.cursor = position;
+            return;
+        }
         if self.history.get(self.cursor) == Some(&index) {
             return;
         }
-        self.remaining.retain(|&candidate| candidate != index);
+        if self.remaining.last() == Some(&index) {
+            self.remaining.pop();
+        } else {
+            self.remaining.retain(|&candidate| candidate != index);
+        }
         if self.history.is_empty() {
             self.record(index);
         } else {
@@ -126,13 +138,15 @@ mod tests {
     #[test]
     fn visits_each_readable_photo_once_and_stops_without_looping() {
         let mut failed = HashSet::new();
-        let mut shuffle = Shuffle::new(6, 0, &failed);
+        let mut shuffle = Shuffle::new(6, Some(0), &failed);
         let corrupt = shuffle.step(1, 6, false, &failed).unwrap();
         failed.insert(corrupt);
+        shuffle.reject();
 
         let mut seen = HashSet::from([0]);
         while let Some(index) = shuffle.step(1, 6, false, &failed) {
             assert!(seen.insert(index));
+            shuffle.accept(index);
         }
         assert_eq!(seen.len(), 5);
         assert!(!seen.contains(&corrupt));
@@ -141,19 +155,25 @@ mod tests {
     #[test]
     fn previous_retraces_history_across_a_loop_boundary() {
         let failed = HashSet::new();
-        let mut shuffle = Shuffle::new(4, 0, &failed);
+        let mut shuffle = Shuffle::new(4, Some(0), &failed);
         let mut previous = 0;
         for _ in 0..3 {
             previous = shuffle.step(1, 4, true, &failed).unwrap();
+            shuffle.accept(previous);
         }
         let first = shuffle.step(1, 4, true, &failed).unwrap();
         assert_ne!(first, previous);
+        shuffle.accept(first);
         assert_eq!(shuffle.step(-1, 4, true, &failed), Some(previous));
+        shuffle.accept(previous);
         assert_eq!(shuffle.step(1, 4, true, &failed), Some(first));
+        shuffle.accept(first);
 
         let mut seen = HashSet::from([first]);
         for _ in 0..3 {
-            assert!(seen.insert(shuffle.step(1, 4, true, &failed).unwrap()));
+            let index = shuffle.step(1, 4, true, &failed).unwrap();
+            assert!(seen.insert(index));
+            shuffle.accept(index);
         }
         assert_eq!(seen.len(), 4);
     }
@@ -161,11 +181,14 @@ mod tests {
     #[test]
     fn thumbnail_jump_counts_toward_the_current_pass() {
         let failed = HashSet::new();
-        let mut shuffle = Shuffle::new(3, 0, &failed);
-        shuffle.jump(2);
+        let mut shuffle = Shuffle::new(3, Some(0), &failed);
+        shuffle.accept(2);
         assert_eq!(shuffle.step(-1, 3, false, &failed), Some(0));
+        shuffle.accept(0);
         assert_eq!(shuffle.step(1, 3, false, &failed), Some(2));
+        shuffle.accept(2);
         assert_eq!(shuffle.step(1, 3, false, &failed), Some(1));
+        shuffle.accept(1);
         assert_eq!(shuffle.step(1, 3, false, &failed), None);
     }
 }

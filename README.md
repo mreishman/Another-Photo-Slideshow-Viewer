@@ -50,6 +50,10 @@ The viewer restores the last folder at startup unless you pass a folder on the
 command line. Slide interval, looping, shuffle, and subfolder preferences are
 saved for the current Windows user.
 
+Unreadable photos are skipped during playback and manual navigation. The
+viewer shows how many it skipped in the current slideshow. Shuffle history
+tracks loaded photos, and navigation waits for the current load to finish.
+
 ## Viewing controls
 
 Click the display mode dropdown or press **M** to choose from **Fit**, **Fill**,
